@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tools for analysing forest point clouds.
+"""
+Tools for analysing forest point clouds.
 
 Inputs: a coloured pointcloud in ``.ply`` format (XYZRGB vertices), which
 can be obtained by putting images from drone photography through
@@ -24,10 +25,15 @@ and `pointclouds <http://phenocam.org.au/pointclouds>`_.
 """
 # pylint:disable=unsubscriptable-object
 
+# log file name base - the log file will be this + the current time + '.log'
+LOG_NAME = 'forestutils'
+
 import argparse
 import csv
 import math
 import os
+import datetime
+import logging
 from typing import MutableMapping, NamedTuple, Tuple, Set
 
 import utm  # type: ignore
@@ -36,12 +42,14 @@ from . import pointcloudfile
 
 
 # User-defined types
+#XY_Coord is
 XY_Coord = NamedTuple('XY_Coord', [('x', int), ('y', int)])
 Coord_Labels = MutableMapping[XY_Coord, int]
 
 
 def coords(pos):
-    """ Return a tuple of integer coordinates as keys for the MapObj dict/map.
+    """
+    Return a tuple of integer coordinates as keys for the MapObj dict/map.
     This is necessary because the MapObj uses a dictionary to store each
     attribute.
     * pos can be a full point tuple, or just (x, y)
@@ -53,7 +61,8 @@ def coords(pos):
 
 
 def neighbors(key: XY_Coord) -> Tuple[XY_Coord, ...]:
-    """ Take an XY coordinate key and return the adjacent keys,
+    """
+    Take an XY coordinate key and return the adjacent keys,
 	whether they exist or not.
     """
     return tuple(XY_Coord(key.x + a, key.y + b)
@@ -61,11 +70,13 @@ def neighbors(key: XY_Coord) -> Tuple[XY_Coord, ...]:
 
 
 def connected_components(input_dict: Coord_Labels) -> None:
-    """ Connected components in a dict of coordinates.
+    """
+    Connected components in a dict of coordinates.
     Uses depth-first search.  Non-component cells are absent from the input.
     """
     def expand(old_key: XY_Coord, com: MutableMapping) -> None:
-        """Implement depth-first search.
+        """
+        Implement depth-first search.
 		"""
         for key in neighbors(old_key):
             if com.get(key) is None:
@@ -82,12 +93,16 @@ def connected_components(input_dict: Coord_Labels) -> None:
         try:
             expand(key, input_dict)
         except RuntimeError:
+            logging.info('Maximum recursion depth exceeded; finishing run.')
             # Recursion depth; finish on next pass.
             continue
 
 
 def detect_issues(ground_dict: Coord_Labels, prior: set) -> Set[XY_Coord]:
-    """Identifies cells with more than 2:1 slope to 3+ adjacent cells.
+    """
+    Identifies cells with more than 2:1 slope to 3+ adjacent cells.
+    Greater than 2:1 slope is suspiciously steep; 3+ usually indicates a
+    misclassified cell or data artefact.
     """
     problematic = set()
     for k in prior:
@@ -104,9 +119,11 @@ def detect_issues(ground_dict: Coord_Labels, prior: set) -> Set[XY_Coord]:
 
 
 def smooth_ground(ground_dict: Coord_Labels) -> None:
-    """Smooths the ground map, to reduce the impact of spurious points, eg.
+    """
+    Smoothes the ground map, to reduce the impact of spurious points, eg.
     points far underground or misclassification of canopy as ground.
     """
+    logging.info('Smoothing the ground map.')
     problematic = set(ground_dict)
     for _ in range(100):
         problematic = detect_issues(ground_dict, problematic)
@@ -120,10 +137,12 @@ def smooth_ground(ground_dict: Coord_Labels) -> None:
 
 
 class MapObj:
-    """Stores a maximum and minimum height map of the cloud, in GRID_SIZE
+    """
+    Stores a maximum and minimum height map of the cloud, in GRID_SIZE
     cells.  Hides data structure and accessed through coordinates.
     Data structure is a set of dictionaries, one for each attribute. Each dict
     is a contains, for a single attribute, all the values for all the points.
+    Note that the dict is faster to access than an array.
     """
     # pylint:disable=too-many-instance-attributes
 
@@ -139,6 +158,7 @@ class MapObj:
             zone (int): the UTM zone of the site.
             south (bool): if the site is in the southern hemisphere.
         """
+        logging.debug('Create a MapObj')
         self.file = input_file
         self.canopy = dict()
         self.density = dict()
@@ -149,6 +169,7 @@ class MapObj:
 
         self.header = pointcloudfile.parse_ply_header(
             pointcloudfile.ply_header_text(input_file))
+        logging.info('Moving x,y by utm offset by calling pointcloudfile.offset_for({})'.format(input_file))
         x, y, _ = pointcloudfile.offset_for(input_file)
         self.utm = pointcloudfile.UTM_Coord(x, y, args.utmzone, args.north)
 
@@ -157,10 +178,11 @@ class MapObj:
             self.update_colours()
 
     def update_spatial(self):
-        """ Expand, correct, or maintain map with a new observed point.
-			Initialize density and filtered_density to 1. Increment
-			density but do not incerement filtered_density - that is done in
-			function update_colors
+        """
+        Expand, correct, or maintain map with a new observed point.
+		Initialize density and filtered_density to 1.
+        Increment density but do not increment filtered_density - that is done
+        in function update_colors
         """
         # Fill out the spatial info in the file
         for p in pointcloudfile.read(self.file):
@@ -180,7 +202,8 @@ class MapObj:
         self.trees = self._tree_components()
 
     def update_colours(self):
-        """Expand, correct, or maintain map with a new observed point.
+        """
+        Expand, correct, or maintain map with a new observed point.
         """
         # We assume that vertex attributes not named "x", "y" or "z"
         # are colours, and thus accumulate a total to get the mean
@@ -189,7 +212,8 @@ class MapObj:
                 continue
             p_cols = {k: v for k, v in p._asdict().items() if k not in 'xyz'}
             idx = coords(p)
-            # update filtered_density and divide by this later
+            # filtered_density is the total number of points in the tree after
+            # the ground has been removed
             self.filtered_density[idx] += 1
             if idx not in self.colours:
                 self.colours[idx] = p_cols
@@ -198,7 +222,8 @@ class MapObj:
                     self.colours[idx][k] += v
 
     def is_ground(self, point) -> bool:
-        """Returns boolean whether the point is not classified as ground - i.e.
+        """
+        Returns boolean whether the point is not classified as ground - i.e.
         True if within GROUND_DEPTH of the lowest point in the cell.
         If not lossy, also true for lowest ground point in a cell.
         """
@@ -236,7 +261,8 @@ class MapObj:
         return {s: trees[k] for k, v in key_scale_record.items() for s in v}
 
     def tree_data(self, keys: Set[XY_Coord]) -> dict:
-        """Return a dictionary of data about the tree in the given keys.
+        """
+        Return a dictionary of data about the tree in the given keys.
         """
         # Calculate positional information
         x = self.utm.x + args.cellsize * sum(k.x for k in keys) / len(keys)
@@ -261,7 +287,9 @@ class MapObj:
         return out
 
     def all_trees(self):
-        """ Yield the characteristics of each tree.
+        """
+        Yield the characteristics of each tree.
+        Use to iterate over the trees. 
         """
         ids = list(set(self.trees.values()))
         keys = {v: set() for v in ids}
@@ -276,7 +304,8 @@ class MapObj:
                 yield data
 
     def save_sparse_cloud(self, new_fname, lowest=True, canopy=True):
-        """ Yield points for a sparse point cloud, eliminating ~3/4 of all
+        """
+        Yield points for a canopy-only point cloud, eliminating ~3/4 of all
         points without affecting analysis.
         """
         newpoints = (point for point in pointcloudfile.read(self.file)
@@ -287,15 +316,19 @@ class MapObj:
             self.file = new_fname
 
     def save_individual_trees(self):
-        """Save single trees to files.
+        """
+        Save single trees to pointcloud files, if the 'savetrees' flag is set.
+        Use the directory specified by the savetrees flag.
         """
         if not args.savetrees:
             return
         if os.path.isfile(args.savetrees):
-            raise IOError('Output dir for trees is already a file')
+            error = 'Output dir for trees is a file; a directory is required.'
+            logging.error(error)
+            raise IOError(error)
         if not os.path.isdir(args.savetrees):
             os.makedirs(args.savetrees)
-        # Maps tree ID numbers to a incremental writer for that tree
+        # Map tree ID numbers to an incremental writer for that tree
         tree_to_file = {tree_ID: pointcloudfile.IncrementalWriter(
             os.path.join(args.savetrees, 'tree_{}.ply'.format(tree_ID)),
             self.header, self.utm) for tree_ID in set(self.trees.values())}
@@ -305,13 +338,15 @@ class MapObj:
             if val is not None:
                 tree_to_file[val](point)
 
-    def stream_analysis(self, out: str) -> None:
-        """ Save the list of trees with attributes to the file 'out'.
+    def stream_analysis(self, csv_filename: str) -> None:
         """
+        Save the list of trees with attributes to the file in file 'csv_filename'.
+        """
+        logging.info('Write the tree data to the csv file "{}"'.format(csv_filename))
         header = ('latitude', 'longitude', 'UTM_X', 'UTM_Y', 'UTM_zone',
                   'height', 'area', 'base_altitude', 'point_count') + tuple(
                       a for a in self.header.names if a not in 'xyz')
-        with open(out, 'w', newline='') as csvfile:
+        with open(csv_filename, 'w', newline='') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=header)
             writer.writeheader()
             for data in self.all_trees():
@@ -319,11 +354,12 @@ class MapObj:
 
 
 def get_args():
-    """ Handle command-line arguments, including default values.
+    """
+    Handle command-line arguments, including default values.
     """
     parser = argparse.ArgumentParser(
         description=('Takes a .ply forest  point cloud; outputs a sparse'
-                     '(canopy only) point cloud and a .csv file of attributes'
+                     'point cloud and a .csv file of attributes'
                      'for each tree.'))
     parser.add_argument(
         'file', help='name of the file to process', type=str)
@@ -355,58 +391,123 @@ def get_args():
 
 
 def main_processing():
-    """ Logic on which functions to call, and efficient order.
+    """
+    Logic on which functions to call, and efficient order.
+
     """
     # args is a global variable
     print('Reading from "{}" ...'.format(args.file))
+    logging.info('Reading from "{}" ...'.format(args.file))
 
     # File I/O
-    
+
+    # sparse_filename is a string containing the name of the main output file
     # Set output file name to <input file name>_sparse.ply
-    sparse = os.path.join(args.out, os.path.basename(args.file))
+    sparse_filename = os.path.join(args.out, os.path.basename(args.file))
     if not args.file.endswith('_sparse.ply'):
-        sparse = os.path.join(
+        sparse_filename = os.path.join(
             args.out, os.path.basename(args.file)[:-4] + '_sparse.ply')
-    sparse = sparse.replace('_part_1', '')
-    if os.path.isfile(sparse):
-        attr_map = MapObj(sparse)
+    sparse_filename = sparse_filename.replace('_part_1', '')
+
+    """
+    Confirm why this is done - I am re-running this, so sparse already exists. But when
+    we create the object using the sparse filename, then the .xyz filename is wrong.
+    Confirm what point of this was??
+    """
+    if os.path.isfile(sparse_filename):
+        logging.info('"sparse" file already exist, using this file')
+        attr_map = MapObj(sparse_filename)
         print('Read {} points into {} cells'.format(
+            len(attr_map), len(attr_map.canopy)))
+        logging.info('Read {} points into {} cells'.format(
             len(attr_map), len(attr_map.canopy)))
     else:
         attr_map = MapObj(args.file, colours=False)
         print('Read {} points into {} cells, writing "{}" ...'.format(
-            len(attr_map), len(attr_map.canopy), sparse))
-        attr_map.save_sparse_cloud(sparse)
-        print('Reading colours from ' + sparse)
+            len(attr_map), len(attr_map.canopy), sparse_filename))
+        logging.info('Read {} points into {} cells, writing "{}" ...'.format(
+            len(attr_map), len(attr_map.canopy), sparse_filename))
+        attr_map.save_sparse_cloud(sparse_filename)
+        print('Reading colours from ' + sparse_filename)
+        logging.info('Reading colours from {}'.format(sparse_filename))
         attr_map.update_colours()
     print('File IO complete, starting analysis...')
+    logging.info('File IO complete, starting analysis...')
 
-    table = '{}_analysis.csv'.format(sparse[:-4].replace('_sparse', ''))
+    # table is a string containing the name of the csv file to save tree data in
+    table = '{}_analysis.csv'.format(sparse_filename[:-4].replace('_sparse', ''))
+    # write the tree data to a csv file
+    logging.info('Calling stream_analysis to write the csv file')
     attr_map.stream_analysis(table)
-    if args.savetrees:
+
+    # save pointclouds for individual trees
+    if args.savetrees is not None:
         print('Saving individual trees...')
+        logging.info('Saving individual trees')
         attr_map.save_individual_trees()
     print('Done.')
+    logging.info('Done.')
 
+def logging_setup():
+    """
+    Set up an execution log and set the format for the log records.
+
+    """
+    # get the current time, and create a log file name using the time
+    starttime = str(datetime.datetime.now())
+    print(starttime)
+    # format the time string to something filename friendly (no ':')
+    # and remove milliseconds (after .) and seconds (last 3 chars)
+    starttime = starttime.split(sep='.')[0].replace(':','-')[:-3]
+    logfilename = LOG_NAME + '-' + starttime + '.log'
+
+    # create and configure log
+    # change the level to logging.DEBUG to see all the debugging messages
+    logging.basicConfig(
+        filename=logfilename, level=logging.DEBUG,
+        format='%(asctime)s %(levelname)s - %(funcName)s: %(message)s',
+        datefmt="%Y-%m-%d %H:%M"
+        )
+    logging.info('Started forestutils.')
+    logging.debug(' logging_setup: created a log file')
 
 def main():
-    """ Interface to call from outside the package.
+    """
+    Interface to call from outside the package.
     """
     # pylint:disable=global-statement
-    print('Welcome to main loop forestutils tree analysis software')
+
+    print('Welcome to forestutils 3D tree mapping program.')
+
+    # start an execution log for the program for info and/or debugging
+    logging_setup()
+
     global args
     args = get_args()
+
+    # perform IO checks to ensure that:
+    # - the input file exists
+    # - if given, the output dir exists and is a directory (not a file)
+    # - if the savetrees flag is set, it specifies a valid directory
     if not os.path.isfile(args.file):
+        logging.error('Input file not found.')
         raise IOError('Input file not found, ' + args.file)
-    # Check that 'out' is a valid folder BEFORE doing all the processing
+    # Check that 'out' is a valid folder now, BEFORE doing all the processing
     if not os.path.isdir(args.out):
-         raise IOError('Output directory is not valid, ' + args.out)
-    print('Comencing main processing function.')
+        logging.error('Output directory is not valid.')
+        raise IOError('Output directory is not valid, ' + args.out)
+    # If savetrees flag is set, check if there is a dir specified which
+    # already exists but is a file, and if so raise an error now
+    if args.savetrees is not None:
+        if os.path.isfile(args.savetrees):
+            logging.error('Output dir for trees is a file; a directory is required.')
+            raise IOError('Output dir for trees is a file; a directory is required.')
+
+    logging.info('Commencing main processing function.')
     main_processing()
 
 if __name__ == '__main__':
     # Call to get_args is duplicated to work in static analysis, from
     # command line, and when installed as package (calls main directly)
-    print('Welcome to forestutils tree analysis software')
     args = get_args()
     main()

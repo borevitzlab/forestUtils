@@ -23,6 +23,7 @@ import struct
 import os.path
 from tempfile import SpooledTemporaryFile
 from typing import Iterator, List, NamedTuple, Tuple
+import logging
 
 
 # User-defined types:
@@ -41,13 +42,21 @@ PLY_TYPES = {'float': 'f', 'double': 'd', 'uchar': 'B', 'char': 'b',
 def offset_for(filename: str) -> Tuple[float, float, float]:
     """Return the (x, y, z) UTM offset for a Pix4D or forestutils .ply file."""
     offset = filename[:-4] + '_ply_offset.xyz'
+    logging.info('Identifying offset file as "{}"'.format(offset))
     if os.path.isfile(offset):
         with open(offset) as f:
             x, y, z = tuple(float(n) for n in f.readline().strip().split(' '))
+            logging.info('.xyz file found. Identifed offsets as: x={}, y={}, z={}'.format(x,y,z))
             return x, y, z
+    logging.info('Failed to find offset file "{}"'.format(offset))
     for com in parse_ply_header(ply_header_text(filename))[3]:
         if com.startswith('comment UTM x y zone north'):
-            return float(com.split(' ')[-4]), float(com.split(' ')[-3]), 0
+            x = float(com.split(' ')[-4])
+            y = float(com.split(' ')[-3])
+            z = 0
+            logging.info('Used header data from .ply file for utm offset: x={} y={} z={}'.format(x,y,z))
+            return x, y, z
+    logging.info('No file found and parse_ply_header returned nothing, so returning 0,0,0.')
     return 0, 0, 0
 
 
@@ -122,12 +131,17 @@ def parse_ply_header(header_text: bytes) -> PlyHeader:
     lines = [l.strip() for l in header_text.decode('ascii').split('\n')]
     magic_num, data_format, *lines = lines
     if magic_num != 'ply':
-        raise ValueError('Not a valid .ply file (wrong magic number).')
+        error = 'Not a valid .ply file (wrong magic number).'
+        logging.error(error)
+        raise ValueError(error)
     if not data_format.startswith('format'):
-        raise ValueError(
-            'Unknown data format "{}" for .ply file.'.format(data_format))
+        error = 'Unknown data format "{}" for .ply file.'.format(data_format)
+        logging.error(error)
+        raise ValueError(error)
     if 'ascii' in data_format:
-        raise ValueError('ASCII format .ply files not supported at this time.')
+        error = 'ASCII format .ply files not supported at this time.'
+        logging.error(error)
+        raise ValueError(error)
 
     # Extract comments from lines
     comments = tuple(c for c in lines if c.startswith('comment '))
@@ -136,7 +150,9 @@ def parse_ply_header(header_text: bytes) -> PlyHeader:
     # Get vertex count
     element, _, vertex_count = lines.pop(0).rpartition(' ')
     if element != 'element vertex':
-        raise ValueError('File must begin with vertex data!')
+        error = 'File must begin with vertex data!'
+        logging.error(error)
+        raise ValueError(error)
 
     # Get list of (type, name) pairs from the list of vertex properties
     properties = [(t, n) for _, t, n in itertools.takewhile(
@@ -196,6 +212,7 @@ class IncrementalWriter:
         self.temp_storage = SpooledTemporaryFile(max_size=buffer, mode='w+b')
         self.count = 0
         self.utm = utm
+        logging.debug('At intitialisation, instance of IncrementalWriter.utm = {}'.format(self.utm))
         self.header = header
         # Always write in little-endian mode; only store type information
         self.binary = struct.Struct('<' + header.form_str[1:])
@@ -211,6 +228,7 @@ class IncrementalWriter:
 
     def __del__(self):
         """Flush data to disk and clean up."""
+        logging.debug('Flushing data to disk in IncrementalWriter.__del__()')
         to_ply_types = {v: k for k, v in PLY_TYPES.items()}
         properties = ['property {t} {n}'.format(t=t, n=n) for t, n in zip(
             (to_ply_types[p] for p in self.header.form_str[1:]),
